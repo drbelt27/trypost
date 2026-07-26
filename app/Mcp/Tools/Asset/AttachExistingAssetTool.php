@@ -13,11 +13,13 @@ use App\Support\PostMediaRules;
 use App\Support\PostStatusRules;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Laravel\Mcp\Request;
 use Laravel\Mcp\Response;
 use Laravel\Mcp\ResponseFactory;
 use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Tool;
+use Throwable;
 
 #[Description('Attach an existing Asset Library item to a draft or scheduled post in the current workspace. The operation is idempotent: repeating the same post_id and asset_id never duplicates post media.')]
 class AttachExistingAssetTool extends Tool
@@ -62,13 +64,48 @@ class AttachExistingAssetTool extends Tool
             return Response::error('media_type_not_allowed');
         }
 
-        $attached = app(AttachExistingAsset::class)->handle(
-            $post,
-            $media,
-            data_get($validated, 'alt'),
-        );
+        $startedAt = microtime(true);
+        $mediaCountBefore = count($post->media ?? []);
+
+        try {
+            $attached = app(AttachExistingAsset::class)->handle(
+                $post,
+                $media,
+                data_get($validated, 'alt'),
+            );
+        } catch (Throwable $exception) {
+            Log::error('post.asset.attach', [
+                'event' => 'post.asset.attach',
+                'workspace_id' => $workspaceId,
+                'post_id' => $post->id,
+                'asset_id' => $media->id,
+                'user_id' => $request->user()->id,
+                'attached' => false,
+                'already_attached' => false,
+                'media_count_before' => $mediaCountBefore,
+                'media_count_after' => $mediaCountBefore,
+                'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+                'exception' => $exception::class,
+            ]);
+
+            throw $exception;
+        }
 
         $post->refresh()->load(['postPlatforms.socialAccount', 'labels']);
+        $mediaCountAfter = count($post->media ?? []);
+
+        Log::info('post.asset.attach', [
+            'event' => 'post.asset.attach',
+            'workspace_id' => $workspaceId,
+            'post_id' => $post->id,
+            'asset_id' => $media->id,
+            'user_id' => $request->user()->id,
+            'attached' => $attached,
+            'already_attached' => ! $attached,
+            'media_count_before' => $mediaCountBefore,
+            'media_count_after' => $mediaCountAfter,
+            'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+        ]);
 
         return Response::structured([
             'asset_id' => $media->id,
